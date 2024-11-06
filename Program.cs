@@ -7,7 +7,7 @@ using System.Text.Json;
 
 class MovementTx
 {
-    const int TASK_COUNT = 4;
+    const int TASK_COUNT = 2;
 
     static void Main(string[] args)
     {
@@ -162,12 +162,12 @@ class MovementTx
 
     static async Task<string> GetTxnTimeStampUsAsync(string mevmTxn)
     {
-        //page.Request += (_, request) => Console.WriteLine(">> " + request.Method + " " + request.Url + " " + request.PostData);
-        JsonElement response;
-        await semaphore.WaitAsync();
-        try
+        while (true)
         {
-            response = await page.EvaluateAsync<JsonElement>($$"""
+            try
+            {
+                JsonElement response;
+                response = await page.EvaluateAsync<JsonElement>($$"""
         async () => {
             return await fetch("https://mevm.devnet.imola.movementlabs.xyz/", {
             method: "POST",
@@ -175,50 +175,87 @@ class MovementTx
             body: JSON.stringify({"id":"1","jsonrpc":"2.0","method":"debug_getMoveHash","params":["{{mevmTxn}}"]}),
         }).then(r => r.ok ? r.json() : Promise.reject(r))}
         """);
-        }
-        finally { semaphore.Release(); }
-        string moveTxn = response.GetProperty("result").GetString()!;
-        await semaphore.WaitAsync();
-        try
-        {
-            response = await page.EvaluateAsync<JsonElement>($$"""
+                string moveTxn = response.GetProperty("result").GetString()!;
+                response = await page.EvaluateAsync<JsonElement>($$"""
         async () => {
             return await fetch("https://aptos.devnet.imola.movementlabs.xyz/api/v1/transactions/by_hash/{{moveTxn}}", {
             method: "GET",
             headers: {"Content-Type": "application/json",},
         }).then(r => r.ok ? r.json() : Promise.reject(r))}
         """);
+                string timestamp = response.GetProperty("timestamp").GetString()!;
+                return timestamp;
+            }
+            catch (Exception e)
+            {
+                semaphore.Wait();
+                try
+                {
+                    if (refreshing == null || refreshing.IsCompleted)
+                    {
+                        Console.WriteLine("Restarting browser...");
+                        await browser.CloseAsync();
+                        refreshing = Startup();
+                    }
+                    //if (refreshing == null || refreshing.IsCompleted)
+                    //    refreshing = page.ReloadAsync();
+                    //if (!refreshing.IsCompleted)
+                    //{
+                    //    await refreshing;
+                    //    await page.WaitForURLAsync("https://explorer.devnet.imola.movementlabs.xyz/#/txn/0xc8fb1ec18bb97e5b2157a17a49ebdab3bb7c4b1d951c47e64c14a8b35ec076fe");
+                    //    continue;
+                    //}
+                }
+                finally { semaphore.Release(); }
+                await refreshing;
+                Thread.Sleep(1_000);
+            }
         }
-        finally { semaphore.Release(); }
-        string timestamp = response.GetProperty("timestamp").GetString()!;
-        return timestamp;
     }
 
     static IPlaywright playwright;
     static IBrowser browser;
+    static Task? refreshing = null;
     static IPage page;
     static Queue<(Task<string>, TxTimestamp)> tasks = new(TASK_COUNT);
     private static readonly SemaphoreSlim semaphore = new SemaphoreSlim(1);
 
+    static async Task Startup()
+    {
+        playwright = await Playwright.CreateAsync();
+        IBrowserType firefox = playwright.Firefox;
+        browser = await firefox.LaunchAsync(new() { Headless = true });
+        page = await browser.NewPageAsync();
+        await page.RouteAsync("**/*.{png,jpg,jpeg,css,otf}", route => route.AbortAsync());
+        await page.RouteAsync("https://www.google.com/*", route => route.AbortAsync());
+        await page.RouteAsync("https://events.statsigapi.net/*", route => route.AbortAsync());
+        await page.RouteAsync("https://vc.hotjar.io/*", route => route.AbortAsync());
+        await page.RouteAsync("https://staging.aptosconnect.app/*", route => route.AbortAsync());
+        // Abort based on the request type
+        await page.RouteAsync("**/*", async route => {
+            if ("image".Equals(route.Request.ResourceType))
+                await route.AbortAsync();
+            else
+                await route.ContinueAsync();
+        });
+        await page.GotoAsync("https://explorer.devnet.imola.movementlabs.xyz/#/txn/0xc8fb1ec18bb97e5b2157a17a49ebdab3bb7c4b1d951c47e64c14a8b35ec076fe");
+        page.Response += async (_, resp) =>
+        {
+            if (resp.Status != 200)
+            {
+                try
+                {
+                    Console.WriteLine(">> " + resp.Status + " " + resp.Request.Url + " " + resp.Request.Headers + " " + resp.Request.PostData);
+                    string respText = await resp.TextAsync();
+                    Console.WriteLine(respText);
+                }
+                catch { }
+            }
+        };
+    }
+
     static MovementTx()
     {
-        static async void Startup()
-        {
-            playwright = await Playwright.CreateAsync();
-            IBrowserType firefox = playwright.Firefox;
-            browser = await firefox.LaunchAsync(new() { Headless = false });
-            page = await browser.NewPageAsync();
-            await page.RouteAsync("**/*.{png,jpg,jpeg,css,otf}", route => route.AbortAsync());
-            await page.RouteAsync("https://www.google.com/*", route => route.AbortAsync());
-            // Abort based on the request type
-            await page.RouteAsync("**/*", async route => {
-                if ("image".Equals(route.Request.ResourceType))
-                    await route.AbortAsync();
-                else
-                    await route.ContinueAsync();
-            });
-            await page.GotoAsync("https://explorer.devnet.imola.movementlabs.xyz/#/txn/0xc8fb1ec18bb97e5b2157a17a49ebdab3bb7c4b1d951c47e64c14a8b35ec076fe");
-        }
         Task.Run(Startup);
     }
 }
